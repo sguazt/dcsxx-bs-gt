@@ -1,0 +1,281 @@
+/**
+ * NMSMAX  Nelder-Mead simplex method for direct search optimization.
+ *        [x, fmax, nf] = NMSMAX(FUN, x0, STOPIT, SAVIT) attempts to
+ *        maximize the function FUN, using the starting vector x0.
+ *        The Nelder-Mead direct search method is used.
+ *        Output arguments:
+ *               x    = vector yielding largest function value found,
+ *               fmax = function value at x,
+ *               nf   = number of function evaluations.
+ *        The iteration is terminated when either
+ *               - the relative size of the simplex is <= STOPIT(1)
+ *                 (default 1e-3),
+ *               - STOPIT(2) function evaluations have been performed
+ *                 (default inf, i.e., no limit), or
+ *               - a function value equals or exceeds STOPIT(3)
+ *                 (default inf, i.e., no test on function values).
+ *        The form of the initial simplex is determined by STOPIT(4):
+ *           STOPIT(4) = 0: regular simplex (sides of equal length, the default)
+ *           STOPIT(4) = 1: right-angled simplex.
+ *        Progress of the iteration is not shown if STOPIT(5) = 0 (default 1).
+ *           STOPIT(6) indicates the direction (ie. minimization or 
+ *                   maximization.) Default is 1, maximization.
+ *                   set STOPIT(6)=-1 for minimization
+ *        If a non-empty fourth parameter string SAVIT is present, then
+ *        `SAVE SAVIT x fmax nf' is executed after each inner iteration.
+ *        NB: x0 can be a matrix.  In the output argument, in SAVIT saves,
+ *            and in function calls, x has the same shape as x0.
+ *        NMSMAX(fun, x0, STOPIT, SAVIT, P1, P2,...) allows additional
+ *        arguments to be passed to fun, via feval(fun,x,P1,P2,...).
+ * References:
+ * N. J. Higham, Optimization by direct search in matrix computations,
+ *    SIAM J. Matrix Anal. Appl, 14(2): 317-333, 1993.
+ * C. T. Kelley, Iterative Methods for Optimization, Society for Industrial
+ *    and Applied Mathematics, Philadelphia, PA, 1999.
+ *
+ * From Matrix Toolbox 
+ * Copyright (C) 2002 N.J.Higham
+ * www.maths.man.ac.uk/~higham/mctoolbox
+ * Modifications for octave by A.Adler 2003
+ */
+
+#ifdef DCS_MATH_OPTIM_NELDER_MEAD_SIMPLEX_HPP
+#define DCS_MATH_OPTIM_NELDER_MEAD_SIMPLEX_HPP
+
+
+namespace dcs { namespace math { namespace optim {
+
+template <typename RealT, typename FuncT, typename X0VectorT>
+optimization_result<RealT> nelder_mead_simplex(FuncT fun,
+											   RealT const* x0,
+											   ::std::size_t n,
+											   RealT tol = 1e-3,
+											   ::std::size_t maxfev = ::std::numeric_limits< ::std::size_t >::max(),
+											   RealT maxfval = ::std::numeric_limits<real_type>::infinity(),
+											   bool regular_simplex = true)
+											   bool max = true)
+struct minimization_direction_tag {};
+struct maximization_direction_tag {};
+
+template <typename RealT>
+class nelder_mead_simplex_optimizer
+{
+	public: typedef RealT real_type;
+	public: typedef maximization_direction_tag optimization_direction_tag;
+
+
+	public: template <typename FuncT>
+			optimization_result<real_type> optimize(FuncT fun, real_type const* x0, ::std::size_t n)
+	{
+		namespace ublas = ::boost::numeric::ublas;
+		namespace ublasx = ::boost::numeric::ublasx;
+
+		ublas::vector<RealT> x(n);
+		ublas::matrix<RealT> V(n,n+1,0);
+		for (::std::size_t i = 0; i < n; ++i)
+		{
+			V(i) = x(i) = x0[i];
+			V(i,i+1) = 1;
+		}
+		ublas::vector<RealT> f(n+1,0);
+		f(0) = fun(x);
+		RealT fmax_old = f(0);
+
+		DCS_DEBUG_TRACE("f(x0) = " << f(0));
+
+		::std::size_t k(0);
+		::std::size_t m(0);
+
+		// Set up initial simplex.
+		RealT scale(::std::max(ublas::norm_inf(x),1.0));
+		if (regular_simplex)
+		{
+			// Regular simplex - all edges have same length.
+			// Generated from construction given in reference [18, pp. 80-81] of [1].
+			ublas::vector<RealT> alpha(2);
+			alpha(1) = ::std::sqrt(n+1)-1
+			alpha(0) = alpha(1)+n;
+			alpha *= scale/(n*::std::sqrt(2));
+			ublas::scalar_vector<RealT> one(n, 1);
+			ublas::subrange(V, 0, n, 1, n+1) = ublas::inner_prod(x0 + alpha(1)*one, one);
+			for (::std::size_t j = 1; j <= n; ++j)
+			{
+				V(j-1,j) = x0[j-1] + alpha(0);
+				x = ublas::column(V, j);
+				f(j) = fun(x);
+			}
+		}
+		else
+		{
+			// Right-angled simplex based on co-ordinate axes.
+			ublas::vector<RealT> alpha(scale*ublas::scalar_vector<RealT>(n+1,1));
+			for (::std::size_t j = 1; j <= n; ++j)
+			{
+				ublas::column(V, j) = x0 + alpha(j)*ublas::column(V, j);
+				x = ublas::column(V, j);
+				f(j) = fun(x);
+			}
+		}
+
+		::std::size_t nfev = n+1;
+		// how = 'initial  ';
+
+		ublas::vector< ::std::size_t > j(f.size());
+		::dcs::algorithm::order(f.begin(), f.end(), j.begin());
+		::std::reverse(j.begin(), j.end());
+		ublas::vector<RealT> ff(f);
+		ublas::matrix<RealT> VV(V);
+		for (::std::size_t i = 0; i < j.size(); ++i)
+		{
+			ff(i) = f(j(i));
+			ublas::column(VV, i) = ublas::column(V, j(i));
+		}
+
+		RealT alpha(1);
+		RealT beta(0.5);
+		RealT gamma(2);
+
+		while (true) /// Outer (and only) loop
+		{
+			++k;
+			fmax = f(0);
+			DCS_DEBUG_TRACE("Iter. " << k << " - how = " << how << " - nf = " << nf << " - f = " << fmax << " (" << 100*(fmax-fmax_old)/(::std::abs(fmax_old)+::std::numeric_limits<RealT>::epsilon()));
+			fmax_old = fmax;
+
+			// Three stopping tests
+			// 1. Has fun reached the target value?
+			if (fmax >= target_fval)
+			{
+				break;
+			}
+			// 2. Too many fun evaluations?
+			if (nf >= max_fev)
+			{
+				break;
+			}
+
+			// 3. Converged?   This is test (4.3) in [1].
+			ublas::vector<RealT> v0(ublas::column(V, 1));
+			RealT size_simplex = ublas::norm_1(ublas::subrange(V, 0, n, 1, n+1)-ublasx::rep(v0, n, n)) / ::std::max(1.0, ublas::norm_1(v0));
+			if (size_simplex <= tol)
+			{
+			   //msg = sprintf('Simplex size %9.4e <= %9.4e...quitting\n', ...  size_simplex, tol);
+			   break;
+			}
+
+			//  One step of the Nelder-Mead simplex algorithm
+			//  NJH: Altered function calls and changed CNT to NF.
+			//       Changed each `fr < f(1)' type test to `>' for maximization
+			//       and re-ordered function values after sort.
+
+			ublas::vector<RealT> vbar = (ublasx::sum(ublas::trans(ublas::subrange(V, 0, n, 0, n)))/n);  // Mean value
+			ublas::vector<RealT> vr = (1 + alpha)*vbar - alpha*ublas::column(V, n);
+			x = vr;
+			fr = fun(x);
+			++nf;
+			ublas::vector<RealT> vk(vr); 
+			ublas::vector<RealT> fk = fr;
+			//how = 'reflect, ';
+			if (fr > f(n-1))
+			{
+				if (fr > f(0))
+				{
+				   ve = gamma*vr + (1-gamma)*vbar;
+				   x = ve;
+				   fe = dirn*feval(fun,x,varargin{:});
+				   nf = nf + 1;
+				   if fe > f(1)
+					  vk = ve; fk = fe;
+					  how = 'expand,  ';
+				   end
+				}
+			}
+			else
+				vt = V(:,n+1); ft = f(n+1);
+				if fr > ft
+				   vt = vr;  ft = fr;
+				end
+				vc = beta*vt + (1-beta)*vbar;
+				x(:) = vc;
+				fc = dirn*feval(fun,x,varargin{:});
+				nf = nf + 1;
+				if fc > f(n)
+				   vk = vc; fk = fc;
+				   how = 'contract,';
+				else
+				   for j = 2:n
+					   V(:,j) = (V(:,1) + V(:,j))/2;
+					   x(:) = V(:,j);
+					   f(j) = dirn*feval(fun,x,varargin{:});
+				   end
+				   nf = nf + n-1;
+				   vk = (V(:,1) + V(:,n+1))/2;
+				   x(:) = vk;
+				   fk = dirn*feval(fun,x,varargin{:});
+				   nf = nf + 1;
+				   how = 'shrink,  ';
+				end
+			end
+			V(:,n+1) = vk;
+			f(n+1) = fk;
+			[temp,j] = sort(f);
+			j = j(n+1:-1:1);
+			f = f(j); V = V(:,j);
+
+		}
+
+		while 1    %%%%%% Outer (and only) loop.
+		k = k+1;
+
+			fmax = f(1);
+			if fmax > fmax_old
+			   if ~isempty(savit)
+				  x(:) = V(:,1); eval(['save ' savit ' x fmax nf'])
+			   end
+			end
+			if trace
+			   fprintf('Iter. %2.0f,', k)
+			   fprintf(['  how = ' how '  ']);
+			   fprintf('nf = %3.0f,  f = %9.4e  (%2.1f%%)\n', nf, fmax, ...
+					   100*(fmax-fmax_old)/(abs(fmax_old)+eps))
+			end
+			fmax_old = fmax;
+
+			%%% Three stopping tests from MDSMAX.M
+
+			% Stopping Test 1 - f reached target value?
+			if fmax >= stopit(3)
+			   msg = ['Exceeded target...quitting\n'];
+			   break  % Quit.
+			end
+
+			% Stopping Test 2 - too many f-evals?
+			if nf >= stopit(2)
+			   msg = ['Max no. of function evaluations exceeded...quitting\n'];
+			   break  % Quit.
+			end
+
+			% Stopping Test 3 - converged?   This is test (4.3) in [1].
+			v1 = V(:,1);
+			size_simplex = norm(V(:,2:n+1)-v1(:,ones(1,n)),1) / max(1, norm(v1,1));
+			if size_simplex <= tol
+			   msg = sprintf('Simplex size %9.4e <= %9.4e...quitting\n', ...
+							  size_simplex, tol);
+			   break  % Quit.
+			end
+		end   %%%%%% End of outer (and only) loop.
+
+
+		% Finished.
+		if trace, fprintf(msg), end
+		x(:) = V(:,1);
+	}
+
+	private: real_type max_fev_; ///< Maximum number of function evaluations
+	private: real_type tol_; ///< Tolerance
+}; // nelder_mead_simplex_optimier
+
+
+}}} // Namespace dcs::math::optim
+
+#endif // DCS_MATH_OPTIM_NELDER_MEAD_SIMPLEX_HPP
